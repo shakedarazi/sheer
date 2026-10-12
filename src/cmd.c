@@ -3,6 +3,172 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
+
+/* ── what a command acts on ─────────────────────────────────────────────── */
+
+/*
+ * the shell's redirections, taken off the token list before an analyzer
+ * sees it: `2>&1` and `> out.txt` are not arguments. where stdout goes is
+ * kept so the sentence can name it; an analyzer that names it itself
+ * (cat into a file) sets `used`.
+ */
+typedef struct {
+    char out[256];  /* where stdout goes, "" for the terminal */
+    bool append;
+    bool heredoc;   /* stdin is a here-doc */
+    bool used;
+} Redir;
+
+static Redir g_redir;
+static int   g_sub;         /* token index of a compound command's subcommand */
+static char  g_gitdir[256]; /* git -C <dir> */
+
+/* a redirection token: [N|&]>[>][&N|target], <target, <<WORD, <<<word.
+ * returns how many tokens it spans (1 or 2), 0 if it isn't one. */
+static int redir_take(const TokList *tl, int i, Redir *r)
+{
+    const char *s  = tl->t[i].s;
+    const char *p  = s;
+    bool        fd1 = true;
+
+    if (tl->t[i].type != TT_WORD) return 0;
+    if (*p == '&') p++;
+    else if (*p >= '0' && *p <= '9') {
+        while (*p >= '0' && *p <= '9') p++;
+        fd1 = (p - s == 1 && s[0] == '1');
+    }
+    if (*p == '>') {
+        bool append = p[1] == '>';
+        p += append ? 2 : 1;
+        if (*p == '&' && p[1] >= '0' && p[1] <= '9') return 1;  /* 2>&1 */
+        int         span   = 1;
+        const char *target = p;
+        if (!*p) {
+            if (i + 1 >= tl->n) return 1;
+            target = tl->t[i + 1].s;
+            span   = 2;
+        }
+        if (fd1 && strcmp(target, "/dev/null") != 0) {
+            snprintf(r->out, sizeof r->out, "%s", target);
+            r->append = append;
+        }
+        return span;
+    }
+    if (p != s) return 0;  /* digits without a > are just a word */
+    if (*p == '<') {
+        if (p[1] == '<' && p[2] != '<') {
+            r->heredoc = true;
+            const char *d = p + 2;
+            if (*d == '-') d++;
+            return (*d || i + 1 >= tl->n) ? 1 : 2;
+        }
+        if (p[1] == '<') return p[3] ? 1 : 2;  /* <<<word */
+        return (p[1] || i + 1 >= tl->n) ? 1 : 2;
+    }
+    return 0;
+}
+
+static void redir_strip(const TokList *in, TokList *out, Redir *r)
+{
+    memset(r, 0, sizeof *r);
+    out->n  = 0;
+    out->dd = -1;
+    for (int i = 0; i < in->n; i++) {
+        if (i == in->dd) out->dd = out->n;
+        int span = i > 0 ? redir_take(in, i, r) : 0;
+        if (span) { i += span - 1; continue; }
+        out->t[out->n++] = in->t[i];
+    }
+}
+
+/*
+ * indexes of the positional words from token `from` on, skipping the value
+ * that follows a flag which takes one: short flags by letter in `vshort`
+ * ("nABC"), long ones in `vlong` (NULL-terminated, without "="). a flag's
+ * value attached to it (-n5, --lines=5) is no word to skip.
+ */
+static int words_of(const TokList *tl, int from, const char *vshort,
+                    const char *const *vlong, int *idx, int max)
+{
+    int n = 0;
+    for (int i = from; i < tl->n; i++) {
+        const Tok *t = &tl->t[i];
+        if (t->type == TT_WORD) {
+            if (t->s[0] && n < max) idx[n++] = i;
+            continue;
+        }
+        if (tl->dd >= 0 && i >= tl->dd) continue;
+        bool takes = false;
+        if (t->type == TT_FLAG_SHORT && vshort && strlen(t->s) <= 5 &&
+            strchr(vshort, t->s[strlen(t->s) - 1]) &&
+            !(t->s[1] >= '0' && t->s[1] <= '9'))
+            takes = true;
+        if (t->type == TT_FLAG_LONG && vlong && !strchr(t->s, '='))
+            for (int k = 0; vlong[k]; k++)
+                if (strcmp(t->s, vlong[k]) == 0) takes = true;
+        if (takes) i++;
+    }
+    return n;
+}
+
+/* "a", "a and b", "a, b and c", "a, b and 3 more files" */
+static void list_of(const TokList *tl, const int *idx, int n, char *buf, size_t len)
+{
+    buf[0] = '\0';
+    if (n == 0) return;
+    if (n == 1) { snprintf(buf, len, "%s", tl->t[idx[0]].s); return; }
+    if (n == 2) {
+        snprintf(buf, len, "%s and %s", tl->t[idx[0]].s, tl->t[idx[1]].s);
+        return;
+    }
+    if (n == 3) {
+        snprintf(buf, len, "%s, %s and %s",
+                 tl->t[idx[0]].s, tl->t[idx[1]].s, tl->t[idx[2]].s);
+        return;
+    }
+    snprintf(buf, len, "%s, %s and %d more files",
+             tl->t[idx[0]].s, tl->t[idx[1]].s, n - 2);
+}
+
+/* the value of a count flag: -n 5, -n5, -5, --lines=5, --lines 5 */
+static const char *count_of(const TokList *tl, char letter, const char *lname)
+{
+    for (int i = 1; i < tl->n; i++) {
+        const Tok *t = &tl->t[i];
+        if (tl->dd >= 0 && i >= tl->dd) break;
+        if (t->type == TT_FLAG_SHORT) {
+            if (t->s[1] == letter && t->s[2] == '\0' && i + 1 < tl->n)
+                return tl->t[i + 1].s;
+            if (t->s[1] == letter && t->s[2])
+                return t->s + 2;
+            if (letter == 'n' && t->s[1] >= '0' && t->s[1] <= '9')
+                return t->s + 1;
+        }
+    }
+    return lname ? tok_long_val(tl, lname) : NULL;
+}
+
+/* the value of -X: attached (-Sfoo) or the next token (-S foo) */
+static const char *short_val(const TokList *tl, char letter)
+{
+    for (int i = 1; i < tl->n; i++) {
+        const Tok *t = &tl->t[i];
+        if (t->type != TT_FLAG_SHORT || t->s[1] != letter) continue;
+        if (t->s[2]) return t->s + 2;
+        if (i + 1 < tl->n) return tl->t[i + 1].s;
+    }
+    return NULL;
+}
+
+/* "its input" when a command names no file */
+static const char *files_or_input(const TokList *tl, const int *idx, int n,
+                                  char *buf, size_t len)
+{
+    if (n == 0) return "its input";
+    list_of(tl, idx, n, buf, len);
+    return buf;
+}
 
 /*
  * caveat: we only know the string, not the actual filesystem. /tmp/foo
@@ -1745,26 +1911,284 @@ static void analyze_git_pull(const TokList *tl, Analysis *out)
                  "git pull --ff-only fails instead of creating a merge commit, keeping history clean.");
 }
 
+/* a word after git's subcommand that names a file rather than a commit */
+static bool git_is_path(const TokList *tl, int i)
+{
+    if (tl->dd >= 0) return i >= tl->dd;
+    const char *s = tl->t[i].s;
+    size_t      l = strlen(s);
+    if (strstr(s, "..") || strpbrk(s, "~^@:")) return false;
+    return s[0] == '/' || s[0] == '.' || (l && s[l - 1] == '/') ||
+           (strrchr(s, '.') && strrchr(s, '.') > s);
+}
+
+/* the commits and the paths after git's subcommand */
+static void git_split(const TokList *tl, const char *vshort, const char *const *vlong,
+                      int *revs, int *nrev, char *paths, size_t plen)
+{
+    int idx[TOK_MAX], pidx[TOK_MAX], np = 0;
+    int n = words_of(tl, g_sub + 1, vshort, vlong, idx, TOK_MAX);
+    *nrev = 0;
+    for (int k = 0; k < n; k++) {
+        if (git_is_path(tl, idx[k])) pidx[np++] = idx[k];
+        else                          revs[(*nrev)++] = idx[k];
+    }
+    list_of(tl, pidx, np, paths, plen);
+}
+
+/* " between A and B" for A..B or two commits, " since A" for one */
+static void git_span(const TokList *tl, const int *revs, int nrev,
+                     const char *one, char *buf, size_t len)
+{
+    buf[0] = '\0';
+    if (nrev == 0) return;
+    const char *r   = tl->t[revs[0]].s;
+    const char *dot = strstr(r, "..");
+    if (dot) {
+        const char *b = dot + 2;
+        if (*b == '.') b++;
+        snprintf(buf, len, " between %.*s and %s",
+                 (int)(dot - r), dot == r ? "HEAD" : r, *b ? b : "HEAD");
+    } else if (nrev >= 2) {
+        snprintf(buf, len, " between %s and %s", r, tl->t[revs[1]].s);
+    } else {
+        snprintf(buf, len, " %s %s", one, r);
+    }
+}
+
+static void analyze_git_diff(const TokList *tl, Analysis *out)
+{
+    bool cached = tok_has_long(tl, "--cached") || tok_has_long(tl, "--staged");
+    bool stat   = tok_has_long(tl, "--stat") || tok_has_long(tl, "--shortstat");
+    bool names  = tok_has_long(tl, "--name-only") || tok_has_long(tl, "--name-status");
+
+    int  revs[TOK_MAX], nrev;
+    char paths[512], span[300];
+    git_split(tl, NULL, NULL, revs, &nrev, paths, sizeof paths);
+    git_span(tl, revs, nrev, "since", span, sizeof span);
+
+    if (stat || names) {
+        const char *what = nrev ? "the files changed" :
+                           cached ? "the files staged for the next commit" :
+                                    "the files with uncommitted changes";
+        snprintf(out->explanation, sizeof out->explanation, "Lists %s%s%s%s%s.",
+                 what, paths[0] ? " in " : "", paths, span,
+                 stat ? ", with a count of changed lines" : "");
+    } else {
+        snprintf(out->explanation, sizeof out->explanation, "Shows the %schanges%s%s%s.",
+                 cached ? "staged " : nrev ? "" : "uncommitted ",
+                 paths[0] ? " to " : "", paths, span);
+    }
+    out->risk = RISK_SAFE;
+}
+
+/* the subject of a commit message, even one given as "$(cat <<'EOF' ...)" */
+static void commit_subject(const char *m, char *buf, size_t len)
+{
+    if (strncmp(m, "$(cat <<", 8) == 0) {
+        const char *nl = strchr(m, '\n');
+        m = nl ? nl + 1 : "";
+    }
+    size_t l = strcspn(m, "\n");
+    if (l > 72) snprintf(buf, len, "%.69s...", m);
+    else        snprintf(buf, len, "%.*s", (int)l, m);
+}
+
 static void analyze_git_commit(const TokList *tl, Analysis *out)
 {
     bool amend   = tok_has_long(tl, "--amend");
     bool all     = tok_has_short(tl, 'a') || tok_has_long(tl, "--all");
     bool no_edit = tok_has_long(tl, "--no-edit");
+    const char *m = tok_short_val(tl, 'm');
+    if (!m) m = tok_long_val(tl, "--message");
+
+    char subject[128] = "", quoted[160] = "";
+    if (m) commit_subject(m, subject, sizeof subject);
+    if (subject[0]) snprintf(quoted, sizeof quoted, ": \"%s\"", subject);
 
     if (amend) {
         snprintf(out->explanation, sizeof out->explanation,
-                 "Modifies the last commit (message%s).",
-                 no_edit ? ", keeping the existing message" : " and/or staged changes");
+                 "Rewrites the last commit with the staged changes%s.",
+                 no_edit ? ", keeping its message" : quoted);
         out->risk = RISK_MEDIUM;
         snprintf(out->warning, sizeof out->warning,
                  "--amend rewrites history. If you've already pushed, you'll need --force.");
     } else {
         snprintf(out->explanation, sizeof out->explanation,
-                 "Records staged changes as a new commit%s.",
-                 all ? " (including all modified tracked files)" : "");
+                 "Records %s as a new commit%s.",
+                 all ? "every change to tracked files" : "the staged changes", quoted);
         out->risk = RISK_SAFE;
     }
 }
+
+static void analyze_git_status(const TokList *tl, Analysis *out)
+{
+    int  idx[TOK_MAX];
+    int  n = words_of(tl, g_sub + 1, NULL, NULL, idx, TOK_MAX);
+    char paths[512];
+    list_of(tl, idx, n, paths, sizeof paths);
+    snprintf(out->explanation, sizeof out->explanation,
+             "Shows which files are changed, staged or untracked%s%s.",
+             n ? " in " : "", paths);
+    out->risk = RISK_SAFE;
+}
+
+static void analyze_git_log(const TokList *tl, Analysis *out)
+{
+    static const char *const vlong[] = {
+        "--author", "--grep", "--since", "--until", "--after", "--before",
+        "--format", "--pretty", "--max-count", NULL,
+    };
+    const char *count = count_of(tl, 'n', "--max-count");
+    const char *pick  = short_val(tl, 'S');
+    const char *grep  = tok_long_val(tl, "--grep");
+    const char *who   = tok_long_val(tl, "--author");
+
+    int  revs[TOK_MAX], nrev;
+    char paths[512], span[300] = "";
+    git_split(tl, "nSG", vlong, revs, &nrev, paths, sizeof paths);
+    if (nrev && strstr(tl->t[revs[0]].s, "..")) {
+        const char *r = tl->t[revs[0]].s, *dot = strstr(r, "..");
+        snprintf(span, sizeof span, " in %s but not in %.*s",
+                 dot[2] ? dot + 2 : "HEAD", (int)(dot - r), r);
+    } else if (nrev) {
+        snprintf(span, sizeof span, " on %s", tl->t[revs[0]].s);
+    }
+
+    char head[64], filt[512] = "";
+    size_t f = 0;
+    if (paths[0]) f += (size_t)snprintf(filt + f, sizeof filt - f, " that changed %s", paths);
+    if (pick && f < sizeof filt)
+        f += (size_t)snprintf(filt + f, sizeof filt - f, "%s added or removed '%s'",
+                              f ? " and" : " that", pick);
+    if (grep && f < sizeof filt)
+        f += (size_t)snprintf(filt + f, sizeof filt - f, " whose message mentions '%s'", grep);
+    if (who && f < sizeof filt)
+        snprintf(filt + f, sizeof filt - f, " by %s", who);
+
+    if (count && strcmp(count, "1") == 0) snprintf(head, sizeof head, "the last commit");
+    else if (count)               snprintf(head, sizeof head, "the last %s commits", count);
+    else if (filt[0] || span[0])  snprintf(head, sizeof head, "the commits");
+    else                          snprintf(head, sizeof head, "the commit history");
+
+    bool patch = tok_has_short(tl, 'p') || tok_has_long(tl, "--patch");
+    snprintf(out->explanation, sizeof out->explanation, "Shows %s%s%s%s%s.",
+             head, filt, span,
+             tok_has_long(tl, "--all") ? " on every branch" : "",
+             tok_has_long(tl, "--oneline") ? ", one line each" :
+             patch ? ", with their diffs" :
+             tok_has_long(tl, "--stat") ? ", with the files each changed" : "");
+    out->risk = RISK_SAFE;
+}
+
+static void analyze_git_add(const TokList *tl, Analysis *out)
+{
+    int  idx[TOK_MAX];
+    int  n = words_of(tl, g_sub + 1, NULL, NULL, idx, TOK_MAX);
+    char files[512];
+    list_of(tl, idx, n, files, sizeof files);
+
+    if (tok_has_short(tl, 'A') || tok_has_long(tl, "--all"))
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Stages every change in the repo for the next commit.");
+    else if (tok_has_short(tl, 'u') || tok_has_long(tl, "--update"))
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Stages the changes to tracked files%s%s for the next commit.",
+                 n ? " in " : "", files);
+    else if (tok_has_short(tl, 'p') || tok_has_long(tl, "--patch"))
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Asks, change by change, what to stage%s%s.", n ? " in " : "", files);
+    else if (n == 1 && (strcmp(files, ".") == 0 || files[strlen(files) - 1] == '/'))
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Stages every change under %s for the next commit.", files);
+    else
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Stages %s for the next commit.", n ? files : "nothing");
+    out->risk = RISK_SAFE;
+}
+
+static void analyze_git_show(const TokList *tl, Analysis *out)
+{
+    int idx[TOK_MAX];
+    int n = words_of(tl, g_sub + 1, NULL, NULL, idx, TOK_MAX);
+    const char *rev   = n ? tl->t[idx[0]].s : NULL;
+    const char *colon = rev ? strchr(rev, ':') : NULL;
+
+    if (colon)
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Shows %s as it was at %.*s.", colon + 1,
+                 (int)(colon - rev), colon == rev ? "the staging area" : rev);
+    else
+        snprintf(out->explanation, sizeof out->explanation, "Shows %s%s%s.",
+                 rev ? "commit " : "the last commit", rev ? rev : "",
+                 tok_has_long(tl, "--stat") || tok_has_long(tl, "--name-only") ||
+                 tok_has_long(tl, "--name-status")
+                     ? " and the files it changed" : " and its changes");
+    out->risk = RISK_SAFE;
+}
+
+static void analyze_git_branch(const TokList *tl, Analysis *out)
+{
+    int idx[TOK_MAX];
+    int n = words_of(tl, g_sub + 1, NULL, NULL, idx, TOK_MAX);
+    const char *a = n > 0 ? tl->t[idx[0]].s : "";
+    const char *b = n > 1 ? tl->t[idx[1]].s : "";
+    bool force_del = false;
+    for (int i = g_sub + 1; i < tl->n; i++)
+        if (strcmp(tl->t[i].s, "-D") == 0) force_del = true;
+
+    out->risk = RISK_SAFE;
+    if (tok_has_long(tl, "--show-current")) {
+        snprintf(out->explanation, sizeof out->explanation, "Prints the current branch name.");
+    } else if (force_del || tok_has_short(tl, 'd') || tok_has_long(tl, "--delete")) {
+        snprintf(out->explanation, sizeof out->explanation, "Deletes the branch %s%s.",
+                 a, force_del ? ", even if it isn't merged" : "");
+        out->risk = force_del ? RISK_MEDIUM : RISK_LOW;
+        if (force_del)
+            snprintf(out->warning, sizeof out->warning,
+                     "Commits only on that branch become unreachable.");
+    } else if (tok_has_short(tl, 'm') || tok_has_short(tl, 'M') || tok_has_long(tl, "--move")) {
+        if (n > 1)
+            snprintf(out->explanation, sizeof out->explanation,
+                     "Renames the branch %s to %s.", a, b);
+        else
+            snprintf(out->explanation, sizeof out->explanation,
+                     "Renames the current branch to %s.", a);
+    } else if (n > 0) {
+        snprintf(out->explanation, sizeof out->explanation, "Creates the branch %s%s%s.",
+                 a, n > 1 ? " from " : "", b);
+    } else {
+        snprintf(out->explanation, sizeof out->explanation, "Lists %s.",
+                 tok_has_short(tl, 'a') || tok_has_long(tl, "--all")
+                     ? "every branch, local and remote" :
+                 tok_has_short(tl, 'r') || tok_has_long(tl, "--remotes")
+                     ? "the remote branches" : "the local branches");
+    }
+}
+
+static void analyze_git_rev_parse(const TokList *tl, Analysis *out)
+{
+    int idx[TOK_MAX];
+    int n = words_of(tl, g_sub + 1, NULL, NULL, idx, TOK_MAX);
+    const char *rev = n ? tl->t[idx[0]].s : NULL;
+
+    if (tok_has_long(tl, "--show-toplevel"))
+        snprintf(out->explanation, sizeof out->explanation, "Prints the repo's root folder.");
+    else if (tok_has_long(tl, "--abbrev-ref"))
+        snprintf(out->explanation, sizeof out->explanation, "Prints the current branch name.");
+    else if (tok_has_long(tl, "--git-dir") || tok_has_long(tl, "--git-common-dir"))
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Prints the path of the repo's .git folder.");
+    else if (tok_has_long(tl, "--is-inside-work-tree"))
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Checks whether this folder is inside a git repo.");
+    else if (rev)
+        snprintf(out->explanation, sizeof out->explanation, "Prints the commit id of %s.", rev);
+    else
+        snprintf(out->explanation, sizeof out->explanation, "Prints details of the git repo.");
+    out->risk = RISK_SAFE;
+}
+
 
 static void analyze_git_merge(const TokList *tl, Analysis *out)
 {
@@ -1869,21 +2293,6 @@ static void analyze_git_stash(const TokList *tl, Analysis *out)
     }
 }
 
-static void analyze_git_diff(const TokList *tl, Analysis *out)
-{
-    bool cached  = tok_has_long(tl, "--cached") || tok_has_long(tl, "--staged");
-    bool stat    = tok_has_long(tl, "--stat");
-    bool check   = tok_has_long(tl, "--check");
-
-    snprintf(out->explanation, sizeof out->explanation,
-             "Shows %s%s.",
-             cached ? "staged (not yet committed) " : "",
-             stat   ? "a summary of changed files" :
-             check  ? "whitespace issues in the diff" :
-                      "a line-by-line diff of changes");
-    out->risk = RISK_SAFE;
-    (void)check;
-}
 
 /* ---------------------------------------------------------------- more docker */
 
@@ -2302,17 +2711,333 @@ static void analyze_awk(const TokList *tl, Analysis *out)
 
 static void analyze_cat(const TokList *tl, Analysis *out)
 {
-    char target[256] = "stdin";
-    for (int i = 1; i < tl->n; i++) {
-        if (tl->t[i].type == TT_WORD) {
-            snprintf(target, sizeof target, "%s", tl->t[i].s);
-            break;
-        }
+    int  idx[TOK_MAX];
+    int  n = words_of(tl, 1, NULL, NULL, idx, TOK_MAX);
+    char files[512];
+    list_of(tl, idx, n, files, sizeof files);
+
+    if (g_redir.out[0]) {
+        g_redir.used = true;
+        if (n == 0)
+            snprintf(out->explanation, sizeof out->explanation,
+                     g_redir.append ? "Adds the %s to the end of %s."
+                                    : "Writes the %s into %s.",
+                     g_redir.heredoc ? "text that follows" : "input", g_redir.out);
+        else
+            snprintf(out->explanation, sizeof out->explanation,
+                     g_redir.append ? "Appends %s to %s." : "Copies %s into %s.",
+                     files, g_redir.out);
+    } else if (n == 0) {
+        snprintf(out->explanation, sizeof out->explanation, "Prints %s.",
+                 g_redir.heredoc ? "the text that follows" : "its input");
+    } else {
+        snprintf(out->explanation, sizeof out->explanation, "Prints %s.", files);
     }
+    out->risk = g_redir.out[0] ? path_risk(g_redir.out) : RISK_SAFE;
+}
+
+static const char *const ends_lines[] = { "--lines", "--bytes", NULL };
+
+/* 'a' or 'b' for a pattern that is an alternation, split on `sep` */
+static void quote_alts(const char *pat, const char *sep, char *buf, size_t len)
+{
+    const char *parts[16];
+    size_t      plen[16];
+    int         n = 0;
+    size_t      sl = strlen(sep);
+    for (const char *p = pat; n < 16; ) {
+        const char *q = strstr(p, sep);
+        parts[n] = p;
+        plen[n++] = q ? (size_t)(q - p) : strlen(p);
+        if (!q) break;
+        p = q + sl;
+    }
+    size_t o = 0;
+    buf[0] = '\0';
+    for (int k = 0; k < n && o < len; k++)
+        o += (size_t)snprintf(buf + o, len - o, "%s'%.*s'",
+                              k == 0 ? "" : k == n - 1 ? " or " : ", ",
+                              (int)plen[k], parts[k]);
+}
+
+static void analyze_grep(const TokList *tl, Analysis *out)
+{
+    static const char *const vlong[] = {
+        "--regexp", "--file", "--include", "--exclude", "--exclude-dir",
+        "--max-count", "--context", "--after-context", "--before-context",
+        "--glob", "--type", "--type-not", "--max-depth", NULL,
+    };
+    const char *cmd = strrchr(tl->t[0].s, '/');
+    cmd = cmd ? cmd + 1 : tl->t[0].s;
+    bool rg = strcmp(cmd, "rg") == 0;
+
+    int idx[TOK_MAX];
+    int n = words_of(tl, 1, rg ? "efgtmABCMT" : "efABCmdD", vlong, idx, TOK_MAX);
+
+    const char *pattern = tok_short_val(tl, 'e');
+    if (!pattern) pattern = tok_long_val(tl, "--regexp");
+    int first = 0;
+    if (!pattern && n > 0 && !(rg && tok_has_long(tl, "--files"))) {
+        pattern = tl->t[idx[0]].s;
+        first   = 1;
+    }
+
+    /* the files searched: --include, or rg's -g glob (one starting with !
+     * leaves files out, it doesn't name the ones searched) or -t type */
+    const char *inc = tok_long_val(tl, "--include");
+    for (int i = 1; rg && !inc && i < tl->n - 1; i++)
+        if ((strcmp(tl->t[i].s, "-g") == 0 || strcmp(tl->t[i].s, "--glob") == 0) &&
+            tl->t[i + 1].s[0] != '!')
+            inc = tl->t[i + 1].s;
+    if (!inc && rg) inc = tok_short_val(tl, 't');
+
+    bool recursive = rg || tok_has_short(tl, 'r') || tok_has_short(tl, 'R') ||
+                     tok_has_long(tl, "--recursive");
+
+    char paths[512], where[640];
+    list_of(tl, idx + first, n - first, paths, sizeof paths);
+    const char *base = n - first > 0 ? paths : "the current folder";
+    if (recursive && inc)
+        snprintf(where, sizeof where, "every '%s' file under %s", inc, base);
+    else if (recursive)
+        snprintf(where, sizeof where, "every file under %s", base);
+    else
+        snprintf(where, sizeof where, "%s", n - first > 0 ? paths : "its input");
+
+    if (rg && tok_has_long(tl, "--files")) {
+        snprintf(out->explanation, sizeof out->explanation, "Lists %s.", where);
+        out->risk = RISK_SAFE;
+        return;
+    }
+
+    bool ere = rg || tok_has_short(tl, 'E') || tok_has_short(tl, 'P') ||
+               tok_has_long(tl, "--extended-regexp") || strcmp(cmd, "egrep") == 0;
+    char pat[512];
+    /* agents write grep's \| in rg and grep -E too; read it as they meant it */
+    const char *alt = tok_has_short(tl, 'F') ? "\n" :
+                      (!ere || (pattern && strstr(pattern, "\\|"))) ? "\\|" : "|";
+    quote_alts(pattern ? pattern : "", alt, pat, sizeof pat);
+
     snprintf(out->explanation, sizeof out->explanation,
-             "Concatenates and prints %s to stdout.", target);
+             "Searches %s for %s%s%s%s%s.",
+             where, pat,
+             tok_has_short(tl, 'i') || tok_has_long(tl, "--ignore-case")
+                 ? ", ignoring case" : "",
+             tok_has_short(tl, 'v') || tok_has_long(tl, "--invert-match")
+                 ? ", keeping the lines that don't match" : "",
+             tok_has_short(tl, 'l') || tok_has_long(tl, "--files-with-matches")
+                 ? ", listing the files that match" : "",
+             tok_has_short(tl, 'c') || tok_has_long(tl, "--count")
+                 ? ", counting the matches" : "");
     out->risk = RISK_SAFE;
 }
+
+static void analyze_head(const TokList *tl, Analysis *out)
+{
+    const char *bytes = count_of(tl, 'c', "--bytes");
+    const char *lines = count_of(tl, 'n', "--lines");
+    int  idx[TOK_MAX];
+    int  n = words_of(tl, 1, "nc", ends_lines, idx, TOK_MAX);
+    char files[512];
+
+    snprintf(out->explanation, sizeof out->explanation,
+             "Prints the first %s %s of %s.",
+             bytes ? bytes : lines ? lines : "10", bytes ? "bytes" : "lines",
+             files_or_input(tl, idx, n, files, sizeof files));
+    out->risk = RISK_SAFE;
+}
+
+static void analyze_tail(const TokList *tl, Analysis *out)
+{
+    const char *lines  = count_of(tl, 'n', "--lines");
+    bool        follow = tok_has_short(tl, 'f') || tok_has_short(tl, 'F') ||
+                         tok_has_long(tl, "--follow");
+    int  idx[TOK_MAX];
+    int  n = words_of(tl, 1, "nc", ends_lines, idx, TOK_MAX);
+    char files[512];
+    const char *what = files_or_input(tl, idx, n, files, sizeof files);
+
+    if (lines && lines[0] == '+')
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Prints %s from line %s on%s.", what, lines + 1,
+                 follow ? ", and keeps printing new lines" : "");
+    else
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Prints the last %s lines of %s%s.", lines ? lines : "10", what,
+                 follow ? " and keeps printing new ones" : "");
+    out->risk = RISK_SAFE;
+}
+
+/* one sed address: a line number, $ or /regex/. returns the char after it */
+static const char *sed_addr(const char *p, char *buf, size_t len, bool *re)
+{
+    size_t k = 0;
+    *re = false;
+    if (*p == '/') {
+        *re = true;
+        for (p++; *p && *p != '/'; p++) {
+            if (*p == '\\' && p[1]) { if (k + 1 < len) buf[k++] = *p++; }
+            if (k + 1 < len) buf[k++] = *p;
+        }
+        if (*p == '/') p++;
+    } else {
+        while ((*p >= '0' && *p <= '9') || *p == '$')
+            if (k + 1 < len) buf[k++] = *p++; else p++;
+    }
+    buf[k] = '\0';
+    return p;
+}
+
+/* the parts of s/a/b/flags, split on the delimiter after the s */
+static bool sed_subst(const char *p, char *a, char *b, size_t len, bool *global)
+{
+    if (*p != 's' || !p[1]) return false;
+    char        d = p[1];
+    char       *parts[2] = { a, b };
+    const char *q = p + 2;
+    for (int k = 0; k < 2; k++) {
+        size_t o = 0;
+        for (; *q && *q != d; q++) {
+            if (*q == '\\' && q[1] == d) q++;
+            if (o + 1 < len) parts[k][o++] = *q;
+        }
+        parts[k][o] = '\0';
+        if (*q != d) return false;
+        q++;
+    }
+    *global = strchr(q, 'g') != NULL;
+    return true;
+}
+
+/* "55-80 and 86-100" for a script of numeric `Np` / `N,Mp` commands */
+static bool sed_ranges(const char *p, char *buf, size_t len)
+{
+    char   part[16][40];
+    int    n = 0;
+    while (*p && n < 16) {
+        char a[32] = "", b[32] = "";
+        bool re;
+        while (*p == ' ') p++;
+        p = sed_addr(p, a, sizeof a, &re);
+        if (re || !a[0] || a[0] == '$') return false;
+        if (*p == ',') {
+            p = sed_addr(p + 1, b, sizeof b, &re);
+            if (re || !b[0]) return false;
+        }
+        if (*p++ != 'p') return false;
+        while (*p == ' ') p++;
+        if (*p && *p != ';') return false;
+        if (*p == ';') p++;
+        if (!b[0])                    snprintf(part[n++], sizeof part[0], "%s", a);
+        else if (strcmp(b, "$") == 0) snprintf(part[n++], sizeof part[0], "%s to the end", a);
+        else                          snprintf(part[n++], sizeof part[0], "%s-%s", a, b);
+    }
+    size_t o = 0;
+    buf[0] = '\0';
+    for (int k = 0; k < n && o < len; k++)
+        o += (size_t)snprintf(buf + o, len - o, "%s%s",
+                              k == 0 ? "" : k == n - 1 ? " and " : ", ", part[k]);
+    return n > 1;
+}
+
+static void analyze_sed(const TokList *tl, Analysis *out)
+{
+    static const char *const vlong[] = { "--expression", "--file", NULL };
+    bool inplace = tok_has_long(tl, "--in-place");
+    for (int i = 1; i < tl->n; i++)
+        if (tl->t[i].type == TT_FLAG_SHORT && strncmp(tl->t[i].s, "-i", 2) == 0)
+            inplace = true;
+    bool quiet = tok_has_short(tl, 'n') || tok_has_long(tl, "--quiet") ||
+                 tok_has_long(tl, "--silent");
+
+    int idx[TOK_MAX];
+    int n = words_of(tl, 1, "ef", vlong, idx, TOK_MAX);
+
+    int nscripts = 0;
+    const char *script = NULL;
+    for (int i = 1; i < tl->n - 1; i++)
+        if (strcmp(tl->t[i].s, "-e") == 0 || strcmp(tl->t[i].s, "--expression") == 0) {
+            if (!script) script = tl->t[i + 1].s;
+            nscripts++;
+        }
+    int first = 0;
+    if (!script && n > 0) { script = tl->t[idx[0]].s; first = 1; nscripts = 1; }
+
+    char files[512];
+    const char *what = files_or_input(tl, idx + first, n - first, files, sizeof files);
+    const char *it   = n - first > 1 ? "them" : "it";
+    char tail[64] = "";
+    if (inplace) snprintf(tail, sizeof tail, ", editing %s in place", it);
+
+    char a1[128] = "", a2[128] = "", sa[160], sb[160];
+    bool re1 = false, re2 = false, global = false, done = true;
+    const char *p = script ? script : "";
+    while (*p == ' ') p++;
+
+    char ranges[256];
+    if (nscripts == 1 && quiet && strchr(p, ';') && sed_ranges(p, ranges, sizeof ranges)) {
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Prints lines %s of %s.", ranges, what);
+    } else if (nscripts != 1 || strpbrk(p, ";\n")) {
+        done = false;
+    } else if (sed_subst(p, sa, sb, sizeof sa, &global)) {
+        if (inplace)
+            snprintf(out->explanation, sizeof out->explanation,
+                     global ? "Replaces every '%s' with '%s' in %s%s."
+                            : "Replaces the first '%s' on each line with '%s' in %s%s.",
+                     sa, sb, what, tail);
+        else
+            snprintf(out->explanation, sizeof out->explanation,
+                     global ? "Prints %s with every '%s' replaced by '%s'."
+                            : "Prints %s with the first '%s' on each line replaced by '%s'.",
+                     what, sa, sb);
+    } else {
+        p = sed_addr(p, a1, sizeof a1, &re1);
+        if (*p == ',') p = sed_addr(p + 1, a2, sizeof a2, &re2);
+        char c = *p;
+        if (!a1[0] || !(c == 'p' || c == 'd') || p[1]) {
+            done = false;
+        } else if (c == 'p' && quiet) {
+            if (re1 && a2[0])
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints %s from the line that matches '%s' to the one that matches '%s'.",
+                         what, a1, a2);
+            else if (re1)
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints the lines of %s that match '%s'.", what, a1);
+            else if (strcmp(a2, "$") == 0)
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints %s from line %s to the end.", what, a1);
+            else if (a2[0])
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints lines %s-%s of %s.", a1, a2, what);
+            else
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints line %s of %s.", a1, what);
+        } else if (c == 'd' && !inplace) {
+            if (re1 && !a2[0])
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints %s without the lines that match '%s'.", what, a1);
+            else if (a2[0])
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints %s without lines %s-%s.", what, a1, a2);
+            else
+                snprintf(out->explanation, sizeof out->explanation,
+                         "Prints %s without line %s.", what, a1);
+        } else {
+            done = false;
+        }
+    }
+    if (!done)
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Runs the sed script '%s' on %s%s.", script ? script : "", what, tail);
+
+    out->risk = inplace ? RISK_MEDIUM : RISK_SAFE;
+    if (inplace)
+        snprintf(out->safer, sizeof out->safer,
+                 "Drop -i to preview changes first, then add it once sure.");
+}
+
 
 static void analyze_cut(const TokList *tl, Analysis *out)
 {
@@ -2333,41 +3058,7 @@ static void analyze_cut(const TokList *tl, Analysis *out)
     out->risk = RISK_SAFE;
 }
 
-static void analyze_grep(const TokList *tl, Analysis *out)
-{
-    bool recursive = tok_has_short(tl, 'r') || tok_has_short(tl, 'R');
-    bool invert    = tok_has_short(tl, 'v');
-    bool fixed     = tok_has_short(tl, 'F');
-    bool extended  = tok_has_short(tl, 'E') || tok_has_long(tl, "--extended-regexp");
 
-    char pattern[128] = "";
-    for (int i = 1; i < tl->n; i++) {
-        if (tl->t[i].type == TT_WORD) {
-            snprintf(pattern, sizeof pattern, " for '%s'", tl->t[i].s);
-            break;
-        }
-    }
-
-    const char *engine = fixed ? "fixed string" : extended ? "regex (ERE)" : "regex";
-    snprintf(out->explanation, sizeof out->explanation,
-             "Searches%s using %s%s%s.",
-             pattern, engine,
-             recursive ? " recursively" : "",
-             invert    ? ", printing non-matching lines" : "");
-
-    out->risk = RISK_SAFE;
-}
-
-static void analyze_head(const TokList *tl, Analysis *out)
-{
-    const char *nstr = tok_long_val(tl, "-n");
-    char n[32] = "10";
-    if (nstr) snprintf(n, sizeof n, "%s", nstr);
-
-    snprintf(out->explanation, sizeof out->explanation,
-             "Prints the first %s lines of input.", n);
-    out->risk = RISK_SAFE;
-}
 
 static void analyze_ps(const TokList *tl, Analysis *out)
 {
@@ -2396,32 +3087,6 @@ static void analyze_ps(const TokList *tl, Analysis *out)
     out->risk = RISK_SAFE;
 }
 
-static void analyze_sed(const TokList *tl, Analysis *out)
-{
-    bool inplace = tok_has_short(tl, 'i') || tok_has_long(tl, "--in-place");
-
-    char expr[128] = "";
-    for (int i = 1; i < tl->n; i++) {
-        const Tok *t = &tl->t[i];
-        if (t->type == TT_WORD && t->s[0] != '-') {
-            snprintf(expr, sizeof expr, " expression '%s'", t->s);
-            break;
-        }
-    }
-
-    if (inplace)
-        snprintf(out->explanation, sizeof out->explanation,
-                 "Applies a stream transformation%s directly to the file(s) in-place.",
-                 expr);
-    else
-        snprintf(out->explanation, sizeof out->explanation,
-                 "Applies a stream transformation%s and writes to stdout.", expr);
-
-    out->risk = inplace ? RISK_MEDIUM : RISK_SAFE;
-    if (inplace)
-        snprintf(out->safer, sizeof out->safer,
-                 "Drop -i to preview changes first, then add it once sure.");
-}
 
 static void analyze_sort(const TokList *tl, Analysis *out)
 {
@@ -2445,23 +3110,6 @@ static void analyze_sort(const TokList *tl, Analysis *out)
     out->risk = RISK_SAFE;
 }
 
-static void analyze_tail(const TokList *tl, Analysis *out)
-{
-    const char *nstr = tok_long_val(tl, "-n");
-    bool follow = tok_has_short(tl, 'f') || tok_has_long(tl, "--follow");
-    char n[32] = "10";
-    if (nstr) snprintf(n, sizeof n, "%s", nstr);
-
-    if (follow)
-        snprintf(out->explanation, sizeof out->explanation,
-                 "Streams the last %s lines of a file and keeps watching for new output.",
-                 n);
-    else
-        snprintf(out->explanation, sizeof out->explanation,
-                 "Prints the last %s lines of input.", n);
-
-    out->risk = RISK_SAFE;
-}
 
 static void analyze_tee(const TokList *tl, Analysis *out)
 {
@@ -3964,6 +4612,7 @@ static CmdEntry cmd_table[] = {
     { "awk",            analyze_awk           },
     { "cut",            analyze_cut           },
     { "grep",           analyze_grep          },
+    { "rg",             analyze_grep          },
     { "head",           analyze_head          },
     { "sed",            analyze_sed           },
     { "sort",           analyze_sort          },
@@ -4029,11 +4678,17 @@ static CmdEntry cmd_table[] = {
     { "pip3",           analyze_pip           },
 
     /* git */
+    { "git add",        analyze_git_add       },
+    { "git branch",     analyze_git_branch    },
     { "git checkout",   analyze_git_checkout  },
     { "git clean",      analyze_git_clean     },
     { "git clone",      analyze_git_clone     },
     { "git commit",     analyze_git_commit    },
     { "git diff",       analyze_git_diff      },
+    { "git log",        analyze_git_log       },
+    { "git rev-parse",  analyze_git_rev_parse },
+    { "git show",       analyze_git_show      },
+    { "git status",     analyze_git_status    },
     { "git merge",      analyze_git_merge     },
     { "git pull",       analyze_git_pull      },
     { "git push",       analyze_git_push      },
@@ -4123,7 +4778,34 @@ static bool is_compound_prefix(const char *name)
     return false;
 }
 
-void cmd_analyze(const TokList *tl, Analysis *out)
+static void analyze_one(const TokList *tl, Analysis *out);
+
+/* append ", in <dir>" before the explanation's final period */
+static void say_where(Analysis *out, const char *dir)
+{
+    size_t l = strlen(out->explanation);
+    if (l && out->explanation[l - 1] == '.') out->explanation[--l] = '\0';
+    snprintf(out->explanation + l, sizeof out->explanation - l, ", in %s.", dir);
+}
+
+void cmd_analyze(const TokList *raw, Analysis *out)
+{
+    static TokList tl;
+    redir_strip(raw, &tl, &g_redir);
+    g_gitdir[0] = '\0';
+    analyze_one(&tl, out);
+    if (!out->matched) return;
+
+    if (g_gitdir[0]) say_where(out, g_gitdir);
+    if (g_redir.out[0] && !g_redir.used) {
+        size_t l = strlen(out->explanation);
+        snprintf(out->explanation + l, sizeof out->explanation - l, " %s the output to %s.",
+                 g_redir.append ? "Appends" : "Writes", g_redir.out);
+        out->risk = risk_max(out->risk, path_risk(g_redir.out));
+    }
+}
+
+static void analyze_one(const TokList *tl, Analysis *out)
 {
     ensure_table_sorted();
     memset(out, 0, sizeof *out);
@@ -4155,7 +4837,15 @@ void cmd_analyze(const TokList *tl, Analysis *out)
         const char *sub = NULL;
         /* skip flags between cmd and subcommand, e.g. git -C /path reset */
         for (int i = 1; i < tl->n; i++) {
-            if (tl->t[i].type == TT_WORD) { sub = tl->t[i].s; break; }
+            const char *f = tl->t[i].s;
+            if (strcmp(cmd, "git") == 0 && i + 1 < tl->n &&
+                (strcmp(f, "-C") == 0 || strcmp(f, "-c") == 0 ||
+                 strcmp(f, "--git-dir") == 0 || strcmp(f, "--work-tree") == 0)) {
+                if (f[1] == 'C') snprintf(g_gitdir, sizeof g_gitdir, "%s", tl->t[i + 1].s);
+                i++;
+                continue;
+            }
+            if (tl->t[i].type == TT_WORD) { sub = f; g_sub = i; break; }
         }
         if (sub) {
             snprintf(key, sizeof key, "%s %s", cmd, sub);

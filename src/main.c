@@ -183,17 +183,76 @@ static void config_load(Config *cfg)
  * seps[0] is always meaningless (no separator before the first stage).
  */
 #define MAX_STAGES 16
-static int cmd_split(const char *input, char stages[][512], SepKind seps[], int max)
+
+/*
+ * cut the body of each unquoted here-doc out of the line, keeping its
+ * `<<EOF` marker: the body is text, not commands, and its own | and &&
+ * would otherwise split it into stages. a here-doc inside quotes, as in
+ * git commit -m "$(cat <<'EOF' ...)", stays whole: it is one argument.
+ */
+static void strip_heredocs(const char *in, char *out, size_t len)
+{
+    size_t o = 0;
+    bool in_sq = false, in_dq = false;
+    char delim[64] = "";
+
+    for (const char *p = in; *p && o + 1 < len; p++) {
+        char c = *p;
+        if (c == '\\' && !in_sq && p[1] && o + 2 < len) {
+            out[o++] = c;
+            out[o++] = *++p;
+            continue;
+        }
+        if (c == '\'' && !in_dq) in_sq = !in_sq;
+        else if (c == '"' && !in_sq) in_dq = !in_dq;
+        else if (!in_sq && !in_dq && c == '<' && p[1] == '<' && p[2] != '<') {
+            const char *d = p + 2;
+            if (*d == '-') d++;
+            while (*d == ' ') d++;
+            char q = (*d == '\'' || *d == '"') ? *d++ : 0;
+            size_t dl = 0;
+            while (*d && *d != '\n' && *d != ' ' && *d != q && dl + 1 < sizeof delim)
+                delim[dl++] = *d++;
+            delim[dl] = '\0';
+        } else if (c == '\n' && delim[0] && !in_sq && !in_dq) {
+            /* skip whole lines until the one that is the delimiter */
+            const char *line = p + 1;
+            for (;;) {
+                const char *end = strchr(line, '\n');
+                size_t      ll  = end ? (size_t)(end - line) : strlen(line);
+                const char *t   = line;
+                while (*t == '\t' || *t == ' ') { t++; ll--; }
+                bool last = ll == strlen(delim) && strncmp(t, delim, ll) == 0;
+                if (!end) { p = line + strlen(line) - 1; break; }
+                line = end + 1;
+                if (last) { p = end - 1; break; }
+            }
+            delim[0] = '\0';
+            continue;
+        }
+        out[o++] = c;
+    }
+    out[o] = '\0';
+}
+
+static int cmd_split(const char *raw, char stages[][512], SepKind seps[], int max)
 {
     int  n     = 0;
     char buf[512];
     int  blen  = 0;
     bool in_sq = false, in_dq = false;
     SepKind next_sep = SEP_SEMI; /* sep before stages[0] - ignored */
+    char input[8192];
+    strip_heredocs(raw, input, sizeof input);
 
     for (const char *p = input; ; p++) {
         char c = *p;
 
+        if (c == '\\' && !in_sq && p[1]) {     /* an escaped char never splits */
+            if (blen < 510) { buf[blen++] = c; buf[blen++] = p[1]; }
+            p++;
+            continue;
+        }
         if      (c == '\'' && !in_dq) { in_sq = !in_sq; }
         else if (c == '"'  && !in_sq) { in_dq = !in_dq; }
         else if (!in_sq && !in_dq) {
@@ -204,6 +263,7 @@ static int cmd_split(const char *input, char stages[][512], SepKind seps[], int 
             else if (c == '&' && *(p+1) == '&') { sep = SEP_AND;  skip = 2; }
             else if (c == '|')               { sep = SEP_PIPE; skip = 1; }
             else if (c == ';')               { sep = SEP_SEMI; skip = 1; }
+            else if (c == '\n')              { sep = SEP_SEMI; skip = 1; }
             else if (c == '\0')              { skip = 0; /* flush */ }
 
             if (skip > 0 || c == '\0') {
@@ -386,7 +446,7 @@ int main(int argc, char *argv[])
         } else {
             TokList  tl  = { .n = 0 };
             Analysis res = { .matched = false };
-            tok_parse(input, &tl);
+            tok_parse(nstages == 1 ? stages[0] : input, &tl);
             cmd_analyze(&tl, &res);
             out_render(&res, input, true);
         }
@@ -545,7 +605,7 @@ int main(int argc, char *argv[])
     TokList  tl  = { .n = 0 };
     Analysis res = { .matched = false };
 
-    if (tok_parse(input, &tl) < 0) {
+    if (tok_parse(nstages == 1 ? stages[0] : input, &tl) < 0) {
         fprintf(stderr, "sheer: failed to parse command (too many tokens)\n");
         return 1;
     }

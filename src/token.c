@@ -20,7 +20,8 @@ int tok_parse(const char *restrict cmd, TokList *restrict out)
     if (!cmd || !out)
         return -1;
 
-    out->n = 0;
+    out->n  = 0;
+    out->dd = -1;
 
     char     buf[TOK_SLEN];
     int      blen     = 0;
@@ -47,6 +48,7 @@ int tok_parse(const char *restrict cmd, TokList *restrict out)
                         tok->type = TT_COMMAND;
                     } else if (!dashdash && buf[0] == '-' && buf[1] == '-' && buf[2] == '\0') {
                         dashdash = true;
+                        out->dd  = out->n;
                         in_tok   = false;
                         blen     = 0;
                         if (c == '\0') goto done;

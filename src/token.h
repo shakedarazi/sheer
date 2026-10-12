@@ -23,6 +23,7 @@ typedef struct {
 typedef struct {
     Tok t[TOK_MAX];
     int n;
+    int dd;     /* index of the first token after a bare "--", -1 if none */
 } TokList;
 
 /* how many tokens we parsed, -1 if something went wrong */
