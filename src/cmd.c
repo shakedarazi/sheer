@@ -1719,14 +1719,35 @@ static void analyze_bash(const TokList *tl, Analysis *out)
 static void analyze_python(const TokList *tl, Analysis *out)
 {
     bool inline_cmd = tok_has_short(tl, 'c');
-    const Tok *script = tok_first_word(tl, 1);
+    /* -m, -W and -X take a value, also last in a bundle (-um mod) */
+    int w[1];
+    int nw = words_of(tl, 1, "mWX", NULL, w, 1);
+    const Tok *script = nw ? &tl->t[w[0]] : NULL;
+    const char *module = NULL;
+    for (int i = 1; i < tl->n && (!script || i < w[0]); i++) {
+        const char *s = tl->t[i].s;
+        if (tl->t[i].type == TT_FLAG_SHORT && strlen(s) <= 5 && s[strlen(s) - 1] == 'm'
+            && i + 1 < tl->n)
+            module = tl->t[i + 1].s;
+    }
 
-    if (inline_cmd) {
+    if (module) {
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Runs the Python module '%s'.", module);
+        out->risk = RISK_MEDIUM;
+    } else if (inline_cmd) {
         snprintf(out->explanation, sizeof out->explanation,
                  "Runs an inline Python expression.");
         out->risk = RISK_HIGH;
         snprintf(out->warning, sizeof out->warning,
                  "-c executes arbitrary Python - make sure you know what it does.");
+    } else if (g_redir.heredoc || (script && strcmp(script->s, "-") == 0)) {
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Runs the Python code %s.",
+                 g_redir.heredoc ? "that follows" : "from its input");
+        out->risk = RISK_HIGH;
+        snprintf(out->warning, sizeof out->warning,
+                 "Executes arbitrary Python - make sure you know what it does.");
     } else if (script) {
         snprintf(out->explanation, sizeof out->explanation,
                  "Runs the Python script '%s'.", script->s);

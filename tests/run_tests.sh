@@ -301,6 +301,22 @@ assert_plain "plain unknown single is empty"  "zzqqx -v"                        
 assert_plain "hebrew subject kept whole"     'git commit -m "בבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבב"'   'Records the staged changes as a new commit: "בבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבב".'
 assert_plain "hebrew subject cut by letters" 'git commit -m "אאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאא"'   'Records the staged changes as a new commit: "אאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאא...".'
 
+# python: what it runs, past the flags that take a value
+assert_plain "python script"                 "python3 run.py"                      "Runs the Python script 'run.py'."
+assert_plain "python heredoc code"           "/usr/bin/python3 - <<'EOF'
+print(1)
+EOF"                                                                                   "Runs the Python code that follows."
+assert_plain "python heredoc, no dash"       "python3 <<EOF
+print(1)
+EOF"                                                                                   "Runs the Python code that follows."
+assert_plain "python code from a pipe"       "echo x | python3 -"                  "Prints 'x' to stdout.
+Runs the Python code from its input."
+assert_plain "python module"                 "python3 -m pytest -q tests"          "Runs the Python module 'pytest'."
+assert_plain "python bundled module flag"    "python3 -um http.server 8000"        "Runs the Python module 'http.server'."
+assert_plain "python -W takes a value"       "python3 -W ignore a.py"              "Runs the Python script 'a.py'."
+assert_plain "python -X takes a value"       "python3 -u -X dev run.py"            "Runs the Python script 'run.py'."
+assert_plain "python inline"                 "python3 -c 'print(1)'"               "Runs an inline Python expression."
+
 # report
 echo ""
 printf "  results: %d passed, %d failed\n" "$PASS" "$FAIL"
