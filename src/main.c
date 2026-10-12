@@ -368,8 +368,10 @@ static void usage(const char *prog)
             "  --model=NAME       model name (overrides SHEER_LLM_MODEL env var)\n"
             "  --context          include recent shell history as LLM context\n"
             "  --plain            one line per step (&&, ||, ; or a newline);\n"
-            "                     a pipe's stages share a line; an\n"
-            "                     unrecognised step is an empty line\n"
+            "                     a pipe is one sentence (| head -20 reads\n"
+            "                     \", showing the first 20 lines\"); cd, sleep\n"
+            "                     and echo '---' say nothing in a longer\n"
+            "                     command; an unrecognised step is an empty line\n"
             "  --no-color         disable ANSI colours\n"
             "  --version          print version\n"
             "  --help             this message\n"
@@ -578,6 +580,8 @@ int main(int argc, char *argv[])
 
     if (nstages > 1 || plain) {
         Analysis analyses[MAX_STAGES];
+        bool     quiet[MAX_STAGES], joins[MAX_STAGES];
+        char     clauses[MAX_STAGES][256];
         Risk     overall = RISK_SAFE;
         LlmConf  conf;
         bool     conf_ready = false;
@@ -587,6 +591,8 @@ int main(int argc, char *argv[])
             TokList stl = { .n = 0 };
             tok_parse(stages[i], &stl);
             cmd_analyze(&stl, &analyses[i]);
+            quiet[i] = plain && nstages > 1 && cmd_quiet(&stl);   /* alone, it speaks */
+            joins[i] = plain && cmd_clause(&stl, clauses[i], sizeof clauses[i]);
 
             if (!analyses[i].matched && use_llm) {
                 if (!conf_ready) {
@@ -603,7 +609,7 @@ int main(int argc, char *argv[])
         }
 
         if (plain) {
-            out_render_plain(analyses, seps, nstages);
+            out_render_plain(analyses, seps, quiet, joins, clauses, nstages);
             return 0;
         }
 

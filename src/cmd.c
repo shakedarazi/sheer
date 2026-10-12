@@ -4935,3 +4935,146 @@ static void analyze_one(const TokList *tl, Analysis *out)
         snprintf(out->source, sizeof out->source, "local rules");
     }
 }
+
+/* ---- --plain: a pipe read as one action ---- */
+
+static const char *base_name(const TokList *tl)
+{
+    const char *s = strrchr(tl->t[0].s, '/');
+    return s ? s + 1 : tl->t[0].s;
+}
+
+bool cmd_clause(const TokList *raw, char *out, size_t len)
+{
+    static TokList tl;
+    Redir r;
+    redir_strip(raw, &tl, &r);
+    out[0] = '\0';
+    if (tl.n == 0) return false;
+    const char *cmd = base_name(&tl);
+    int idx[TOK_MAX];
+
+    if (strcmp(cmd, "head") == 0 || strcmp(cmd, "tail") == 0) {
+        if (words_of(&tl, 1, "nc", ends_lines, idx, TOK_MAX) > 0) return false;
+        bool head = cmd[0] == 'h';
+        const char *bytes = head ? count_of(&tl, 'c', "--bytes") : NULL;
+        const char *lines = count_of(&tl, 'n', "--lines");
+        if (!head && lines && lines[0] == '+')
+            snprintf(out, len, ", from line %s on", lines + 1);
+        else
+            snprintf(out, len, ", showing the %s %s %s", head ? "first" : "last",
+                     bytes ? bytes : lines ? lines : "10", bytes ? "bytes" : "lines");
+        return true;
+    }
+    if (strcmp(cmd, "grep") == 0 || strcmp(cmd, "egrep") == 0) {
+        static const char *const vlong[] = { "--regexp", "--max-count", "--context",
+            "--after-context", "--before-context", NULL };
+        int n = words_of(&tl, 1, "efABCm", vlong, idx, TOK_MAX);
+        const char *pattern = tok_short_val(&tl, 'e');
+        if (!pattern) pattern = tok_long_val(&tl, "--regexp");
+        int files = n - (pattern ? 0 : 1);
+        if (!pattern && n > 0) pattern = tl.t[idx[0]].s;
+        if (!pattern || files > 0 || tok_has_short(&tl, 'r') || tok_has_short(&tl, 'R'))
+            return false;
+        bool ere = tok_has_short(&tl, 'E') || strcmp(cmd, "egrep") == 0;
+        char pat[512];
+        quote_alts(pattern, tok_has_short(&tl, 'F') ? "\n" :
+                   (!ere || strstr(pattern, "\\|")) ? "\\|" : "|", pat, sizeof pat);
+        const char *how = tok_has_short(&tl, 'v') ? "without the lines matching" :
+                          tok_has_short(&tl, 'c') ? "counting the lines matching" :
+                                                    "keeping the lines matching";
+        snprintf(out, len, ", %s %s%s", how, pat,
+                 tok_has_short(&tl, 'i') ? ", ignoring case" : "");
+        return true;
+    }
+    if (strcmp(cmd, "wc") == 0) {
+        if (words_of(&tl, 1, "", NULL, idx, TOK_MAX) > 0) return false;
+        bool l = tok_has_short(&tl, 'l'), w = tok_has_short(&tl, 'w'),
+             c = tok_has_short(&tl, 'c');
+        snprintf(out, len, ", counting the %s",
+                 l && !w && !c ? "lines" : w && !l && !c ? "words" :
+                 c && !l && !w ? "bytes" : "lines, words and bytes");
+        return true;
+    }
+    if (strcmp(cmd, "sort") == 0) {
+        if (words_of(&tl, 1, "kto", NULL, idx, TOK_MAX) > 0) return false;
+        snprintf(out, len, ", sorted%s%s%s",
+                 tok_has_short(&tl, 'n') ? " by number" : "",
+                 tok_has_short(&tl, 'r') ? " in reverse" : "",
+                 tok_has_short(&tl, 'u') ? ", without repeats" : "");
+        return true;
+    }
+    if (strcmp(cmd, "uniq") == 0) {
+        if (words_of(&tl, 1, "fs", NULL, idx, TOK_MAX) > 0) return false;
+        snprintf(out, len, "%s",
+                 tok_has_short(&tl, 'c') ? ", counting repeats" :
+                 tok_has_short(&tl, 'd') ? ", only the lines that repeat" :
+                 tok_has_short(&tl, 'u') ? ", only the lines that don't repeat" :
+                                           ", without repeats");
+        return true;
+    }
+    if (strcmp(cmd, "cat") == 0)
+        return tl.n == 1;   /* passes its input on: nothing to say */
+    if (strcmp(cmd, "sed") == 0) {
+        /* sed -n 'A,Bp' or 'Ap' on its input: a range of lines */
+        int n = words_of(&tl, 1, "e", NULL, idx, TOK_MAX);
+        if (!tok_has_short(&tl, 'n') || n != 1) return false;
+        unsigned a = 0, b = 0;
+        char p = 0;
+        const char *s = tl.t[idx[0]].s;
+        if (sscanf(s, "%u,%u%c", &a, &b, &p) == 3 && p == 'p' && !s[strcspn(s, "p") + 1])
+            snprintf(out, len, ", lines %u-%u", a, b);
+        else if (sscanf(s, "%u,$%c", &a, &p) == 2 && p == 'p' && !s[strcspn(s, "p") + 1])
+            snprintf(out, len, ", from line %u on", a);
+        else if (sscanf(s, "%u%c", &a, &p) == 2 && p == 'p' && !s[strcspn(s, "p") + 1])
+            snprintf(out, len, ", line %u", a);
+        else return false;
+        return true;
+    }
+    if (strcmp(cmd, "cut") == 0) {
+        if (words_of(&tl, 1, "dfcb", NULL, idx, TOK_MAX) > 0) return false;
+        const char *f = short_val(&tl, 'f'), *c = short_val(&tl, 'c');
+        if (f)      snprintf(out, len, ", only field%s %s", strpbrk(f, ",-") ? "s" : "", f);
+        else if (c) snprintf(out, len, ", only characters %s", c);
+        else return false;
+        return true;
+    }
+    if (strcmp(cmd, "tee") == 0) {
+        int n = words_of(&tl, 1, "", NULL, idx, TOK_MAX);
+        if (n != 1) return false;
+        snprintf(out, len, ", also %s it to %s",
+                 tok_has_short(&tl, 'a') ? "appending" : "saving", tl.t[idx[0]].s);
+        return true;
+    }
+    return false;
+}
+
+/* an echo whose text is only a line of marks, or a label between them
+ * ("---", "=== tests ===") */
+static bool separator(const TokList *tl)
+{
+    char text[TOK_SLEN] = "";
+    for (int i = 1; i < tl->n; i++)
+        if (tl->t[i].type != TT_FLAG_SHORT || i > 1 || strlen(tl->t[i].s) > 2) {
+            snprintf(text, sizeof text, "%s", tl->t[i].s);
+            break;
+        }
+    const char *marks = "-=#*_~+";
+    size_t lead = strspn(text, marks);
+    if (text[0] && text[lead] == '\0') return true;
+    return lead >= 3;
+}
+
+bool cmd_quiet(const TokList *raw)
+{
+    static TokList tl;
+    Redir r;
+    redir_strip(raw, &tl, &r);
+    if (tl.n == 0) return false;
+    const char *cmd = base_name(&tl);
+    static const char *const noise[] = { "cd", "pushd", "popd", "sleep", "true",
+                                         ":", "set", NULL };
+    for (int i = 0; noise[i]; i++)
+        if (strcmp(cmd, noise[i]) == 0) return true;
+    return (strcmp(cmd, "echo") == 0 || strcmp(cmd, "printf") == 0) && separator(&tl);
+}

@@ -294,7 +294,7 @@ assert_plain "plain stages"                   "git branch && git show"          
 Shows the last commit and its changes."
 assert_plain "plain pipe is one line"         "git branch | zzqqx -v | git show"    "Lists the local branches. Shows the last commit and its changes."
 assert_plain "plain && then a pipe"           "git log --oneline -6 && grep -n 'def run' hook.py | head -20" "Shows the last 6 commits, one line each.
-Searches hook.py for 'def run'. Prints the first 20 lines of its input."
+Searches hook.py for 'def run', showing the first 20 lines."
 assert_plain "plain unknown step is empty"    "git branch; zzqqx -v | zzqqy; git show" "Lists the local branches.
 
 Shows the last commit and its changes."
@@ -302,6 +302,35 @@ assert_plain "plain || and newline"           "git branch || git show
 git branch"                                                                            "Lists the local branches.
 Shows the last commit and its changes.
 Lists the local branches."
+# a stage that only shapes what the one before prints is a clause of its
+# sentence; a step's noise (cd, a separator, sleep) says nothing
+assert_plain "pipe: head"                     "grep -n 'def run' hook.py | head -20" "Searches hook.py for 'def run', showing the first 20 lines."
+assert_plain "pipe: tail"                     "npm test 2>&1 | tail -5"            "Runs the 'test' script defined in package.json, showing the last 5 lines."
+assert_plain "pipe: tail from a line"         "git log | tail -n +3"               "Shows the commit history, from line 3 on."
+assert_plain "pipe: head default"             "ls src | head"                      "Lists files in src, showing the first 10 lines."
+assert_plain "pipe: grep keeps"               "ps aux | grep node | head -3"       "Lists all running processes with CPU, memory, and command details, keeping the lines matching 'node', showing the first 3 lines."
+assert_plain "pipe: grep -v drops"            "git status --short | grep -v '^??'" "Shows which files are changed, staged or untracked, without the lines matching '^??'."
+assert_plain "pipe: wc -l"                    "git branch | wc -l"                 "Lists the local branches, counting the lines."
+assert_plain "pipe: sort and uniq"            "git log --format=%an | sort | uniq -c" "Shows the commit history, sorted, counting repeats."
+assert_plain "pipe: sed a range"              "git show HEAD:a.md | sed -n '100,300p'" "Shows a.md as it was at HEAD, lines 100-300."
+assert_plain "pipe: sed to the end"           "git log | sed -n '5,\$p'"            "Shows the commit history, from line 5 on."
+assert_plain "pipe: sed other scripts stand"  "git log | sed -n '/x/p'"              "Shows the commit history. Prints the lines of its input that match 'x'."
+assert_plain "pipe: cat says nothing"         "git diff | cat"                     "Shows the uncommitted changes."
+assert_plain "pipe: cut a field"              "git log --oneline | cut -d' ' -f1"  "Shows the commit history, one line each, only field 1."
+assert_plain "pipe: tee saves"                "npm test 2>&1 | tee build.log"      "Runs the 'test' script defined in package.json, also saving it to build.log."
+assert_plain "pipe: a filter after nothing known" "zzqqx | head -3"                "Prints the first 3 lines of its input."
+assert_plain "pipe: head of a file stands"    "git branch | head -3 a.txt"         "Lists the local branches. Prints the first 3 lines of a.txt."
+assert_plain "quiet: cd"                      "cd ~/x && ls"                       "
+Lists files in the current directory."
+assert_plain "quiet: separators"              "echo '---' ; echo \"=== tests ===\" ; git branch" "
+
+Lists the local branches."
+assert_plain "quiet: echo with words speaks"  "echo done"                          "Prints 'done' to stdout."
+assert_plain "quiet: sleep, true, set"        "set -e; sleep 2; true; git branch"  "
+
+
+Lists the local branches."
+assert_plain "quiet: alone, it speaks"        "cd ~/x"                             "Changes the current directory to ~/x."
 assert_plain "plain does not wrap"            'grep -n "GET /x\"\|call(\"GET" a.ts' "Searches a.ts for 'GET /x\"' or 'call(\"GET'."
 assert_plain "plain unknown single is empty"  "zzqqx -v"                            ""
 

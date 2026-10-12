@@ -213,18 +213,27 @@ void out_render_gen(const char *description, const char *generated,
     putchar('\n');
 }
 
-void out_render_plain(const Analysis *analyses, const SepKind *seps, int n)
+void out_render_plain(const Analysis *analyses, const SepKind *seps,
+                      const bool *quiet, const bool *joins,
+                      char clauses[][256], int n)
 {
-    bool said = false;   /* this step has a sentence on its line already */
+    char line[2048] = "";   /* this step's line, so far */
     for (int i = 0; i < n; i++) {
-        if (i > 0 && seps[i] != SEP_PIPE) { putchar('\n'); said = false; }
+        if (i > 0 && seps[i] != SEP_PIPE) { printf("%s\n", line); line[0] = '\0'; }
+        size_t l = strlen(line);
+        if (quiet[i]) continue;
+        if (l && joins[i] && seps[i] == SEP_PIPE) {
+            if (line[l - 1] == '.') line[--l] = '\0';
+            snprintf(line + l, sizeof line - l, "%s.", clauses[i]);
+            continue;
+        }
         if (!analyses[i].matched) continue;
-        if (said) putchar(' ');
-        for (const char *c = analyses[i].explanation; *c; c++)
-            putchar(*c == '\n' ? ' ' : *c);
-        said = true;
+        if (l && l + 1 < sizeof line) line[l++] = ' ';
+        for (const char *c = analyses[i].explanation; *c && l + 1 < sizeof line; c++)
+            line[l++] = *c == '\n' ? ' ' : *c;
+        line[l] = '\0';
     }
-    putchar('\n');
+    printf("%s\n", line);
 }
 
 void out_render(const Analysis *a, const char *raw_cmd, bool color)
