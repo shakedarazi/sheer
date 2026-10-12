@@ -213,6 +213,16 @@ void out_render_gen(const char *description, const char *generated,
     putchar('\n');
 }
 
+void out_render_plain(const Analysis *analyses, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (analyses[i].matched)
+            for (const char *c = analyses[i].explanation; *c; c++)
+                putchar(*c == '\n' ? ' ' : *c);
+        putchar('\n');
+    }
+}
+
 void out_render(const Analysis *a, const char *raw_cmd, bool color)
 {
     putchar('\n');

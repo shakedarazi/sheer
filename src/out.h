@@ -28,6 +28,10 @@ void out_render(const Analysis *a, const char *raw_cmd, bool color);
 void out_render_pipeline(const char **stages, const Analysis *analyses,
                          const SepKind *seps, int n, Risk overall, bool color);
 
+/* --plain: each stage's explanation on its own line, unwrapped;
+ * an unrecognised stage is an empty line, so line i is stage i */
+void out_render_plain(const Analysis *analyses, int n);
+
 /* "sheer gen": show the generated command then its risk analysis */
 void out_render_gen(const char *description, const char *generated,
                     const Analysis *a, bool color);

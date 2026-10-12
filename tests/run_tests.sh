@@ -24,6 +24,19 @@ assert_contains() {
 
 assert_risk() { assert_contains "$1" "$2" "$3"; }
 
+# the whole output of `sheer --plain`, exactly
+assert_plain() {
+    local desc="$1" cmd="$2" want="$3"
+    local got
+    got=$("$BIN" --plain "$cmd" 2>&1)
+    if [ "$got" = "$want" ]; then
+        ok
+    else
+        fail "FAIL [$desc]: expected '$want'"
+        fail "     output: '$got'"
+    fi
+}
+
 # risk levels
 assert_risk "rm -rf / is CRITICAL"               "rm -rf /"                       "CRITICAL"
 assert_risk "rm -rf /tmp/* is HIGH"              "rm -rf /tmp/*"                  "HIGH"
@@ -273,6 +286,16 @@ assert_contains "sed several ranges"          "sed -n '55,80p;86,100p' a.md"    
 
 assert_contains "escaped quote stays in one stage" 'grep -n "GET /x\"\|call(\"GET" a.ts | head' "Searches a.ts for 'GET /x\"' or 'call(\"GET'."
 assert_contains "rg with BRE alternation"     'rg -n "^PAGE\|^HTML" a.py'           "Searches every file under a.py for '^PAGE' or '^HTML'."
+
+# --plain: one sentence per stage, nothing else
+assert_plain "plain single"                   "git branch"                          "Lists the local branches."
+assert_plain "plain stages"                   "git branch && git show"              "Lists the local branches.
+Shows the last commit and its changes."
+assert_plain "plain unknown stage is empty"   "git branch | zzqqx -v | git show"    "Lists the local branches.
+
+Shows the last commit and its changes."
+assert_plain "plain does not wrap"            'grep -n "GET /x\"\|call(\"GET" a.ts' "Searches a.ts for 'GET /x\"' or 'call(\"GET'."
+assert_plain "plain unknown single is empty"  "zzqqx -v"                            ""
 
 # report
 echo ""

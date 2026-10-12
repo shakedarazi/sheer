@@ -367,6 +367,8 @@ static void usage(const char *prog)
             "                       (nothing)      reads SHEER_API_KEY + SHEER_API_URL\n"
             "  --model=NAME       model name (overrides SHEER_LLM_MODEL env var)\n"
             "  --context          include recent shell history as LLM context\n"
+            "  --plain            one sentence per stage, one per line;\n"
+            "                     an unrecognised stage is an empty line\n"
             "  --no-color         disable ANSI colours\n"
             "  --version          print version\n"
             "  --help             this message\n"
@@ -401,6 +403,7 @@ int main(int argc, char *argv[])
     const char *llm_provider = cfg.llm[0]   ? cfg.llm   : NULL;
     const char *llm_model    = cfg.model[0] ? cfg.model : NULL;
     bool        no_color     = cfg.no_color || !isatty(STDOUT_FILENO);
+    bool        plain        = false;
     int         cmd_start    = 1;
 
     /* sheer run ["cmd"] - explain then prompt before executing.
@@ -497,6 +500,9 @@ int main(int argc, char *argv[])
         } else if (strcmp(a, "--context") == 0) {
             use_context = true;
             cmd_start   = i + 1;
+        } else if (strcmp(a, "--plain") == 0) {
+            plain     = true;
+            cmd_start = i + 1;
         } else if (strcmp(a, "--no-color") == 0) {
             no_color  = true;
             cmd_start = i + 1;
@@ -569,7 +575,7 @@ int main(int argc, char *argv[])
     SepKind  seps[MAX_STAGES];
     int      nstages = cmd_split(input, stages, seps, MAX_STAGES);
 
-    if (nstages > 1) {
+    if (nstages > 1 || plain) {
         Analysis analyses[MAX_STAGES];
         Risk     overall = RISK_SAFE;
         LlmConf  conf;
@@ -593,6 +599,11 @@ int main(int argc, char *argv[])
                 llm_analyze(stages[i], &conf, &analyses[i]);
             }
             overall = risk_max(overall, analyses[i].risk);
+        }
+
+        if (plain) {
+            out_render_plain(analyses, nstages);
+            return 0;
         }
 
         const char *sptrs[MAX_STAGES];
