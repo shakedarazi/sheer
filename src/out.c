@@ -213,14 +213,18 @@ void out_render_gen(const char *description, const char *generated,
     putchar('\n');
 }
 
-void out_render_plain(const Analysis *analyses, int n)
+void out_render_plain(const Analysis *analyses, const SepKind *seps, int n)
 {
+    bool said = false;   /* this step has a sentence on its line already */
     for (int i = 0; i < n; i++) {
-        if (analyses[i].matched)
-            for (const char *c = analyses[i].explanation; *c; c++)
-                putchar(*c == '\n' ? ' ' : *c);
-        putchar('\n');
+        if (i > 0 && seps[i] != SEP_PIPE) { putchar('\n'); said = false; }
+        if (!analyses[i].matched) continue;
+        if (said) putchar(' ');
+        for (const char *c = analyses[i].explanation; *c; c++)
+            putchar(*c == '\n' ? ' ' : *c);
+        said = true;
     }
+    putchar('\n');
 }
 
 void out_render(const Analysis *a, const char *raw_cmd, bool color)

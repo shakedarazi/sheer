@@ -287,13 +287,21 @@ assert_contains "sed several ranges"          "sed -n '55,80p;86,100p' a.md"    
 assert_contains "escaped quote stays in one stage" 'grep -n "GET /x\"\|call(\"GET" a.ts | head' "Searches a.ts for 'GET /x\"' or 'call(\"GET'."
 assert_contains "rg with BRE alternation"     'rg -n "^PAGE\|^HTML" a.py'           "Searches every file under a.py for '^PAGE' or '^HTML'."
 
-# --plain: one sentence per stage, nothing else
+# --plain: one line per step, nothing else. &&, ||, ; and a newline start
+# a step; the stages of one pipe are one step, their sentences on one line
 assert_plain "plain single"                   "git branch"                          "Lists the local branches."
 assert_plain "plain stages"                   "git branch && git show"              "Lists the local branches.
 Shows the last commit and its changes."
-assert_plain "plain unknown stage is empty"   "git branch | zzqqx -v | git show"    "Lists the local branches.
+assert_plain "plain pipe is one line"         "git branch | zzqqx -v | git show"    "Lists the local branches. Shows the last commit and its changes."
+assert_plain "plain && then a pipe"           "git log --oneline -6 && grep -n 'def run' hook.py | head -20" "Shows the last 6 commits, one line each.
+Searches hook.py for 'def run'. Prints the first 20 lines of its input."
+assert_plain "plain unknown step is empty"    "git branch; zzqqx -v | zzqqy; git show" "Lists the local branches.
 
 Shows the last commit and its changes."
+assert_plain "plain || and newline"           "git branch || git show
+git branch"                                                                            "Lists the local branches.
+Shows the last commit and its changes.
+Lists the local branches."
 assert_plain "plain does not wrap"            'grep -n "GET /x\"\|call(\"GET" a.ts' "Searches a.ts for 'GET /x\"' or 'call(\"GET'."
 assert_plain "plain unknown single is empty"  "zzqqx -v"                            ""
 
@@ -309,8 +317,7 @@ EOF"                                                                            
 assert_plain "python heredoc, no dash"       "python3 <<EOF
 print(1)
 EOF"                                                                                   "Runs the Python code that follows."
-assert_plain "python code from a pipe"       "echo x | python3 -"                  "Prints 'x' to stdout.
-Runs the Python code from its input."
+assert_plain "python code from a pipe"       "echo x | python3 -"                  "Prints 'x' to stdout. Runs the Python code from its input."
 assert_plain "python module"                 "python3 -m pytest -q tests"          "Runs the Python module 'pytest'."
 assert_plain "python bundled module flag"    "python3 -um http.server 8000"        "Runs the Python module 'http.server'."
 assert_plain "python -W takes a value"       "python3 -W ignore a.py"              "Runs the Python script 'a.py'."
@@ -324,8 +331,7 @@ assert_plain "bash -o takes a value"         "bash -e -o pipefail run.sh"       
 assert_plain "bash heredoc"                  "bash <<'EOF'
 ls
 EOF"                                                                                   "Runs the shell commands that follow."
-assert_plain "bash -s from a pipe"           "echo ls | bash -s"                   "Prints 'ls' to stdout.
-Runs the shell commands from its input."
+assert_plain "bash -s from a pipe"           "echo ls | bash -s"                   "Prints 'ls' to stdout. Runs the shell commands from its input."
 assert_plain "bash -lc inline"               "bash -lc 'ls'"                       "Runs an inline shell command string directly."
 
 # a flag's value is no target

@@ -367,8 +367,9 @@ static void usage(const char *prog)
             "                       (nothing)      reads SHEER_API_KEY + SHEER_API_URL\n"
             "  --model=NAME       model name (overrides SHEER_LLM_MODEL env var)\n"
             "  --context          include recent shell history as LLM context\n"
-            "  --plain            one sentence per stage, one per line;\n"
-            "                     an unrecognised stage is an empty line\n"
+            "  --plain            one line per step (&&, ||, ; or a newline);\n"
+            "                     a pipe's stages share a line; an\n"
+            "                     unrecognised step is an empty line\n"
             "  --no-color         disable ANSI colours\n"
             "  --version          print version\n"
             "  --help             this message\n"
@@ -602,7 +603,7 @@ int main(int argc, char *argv[])
         }
 
         if (plain) {
-            out_render_plain(analyses, nstages);
+            out_render_plain(analyses, seps, nstages);
             return 0;
         }
 

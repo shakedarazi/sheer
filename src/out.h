@@ -28,9 +28,11 @@ void out_render(const Analysis *a, const char *raw_cmd, bool color);
 void out_render_pipeline(const char **stages, const Analysis *analyses,
                          const SepKind *seps, int n, Risk overall, bool color);
 
-/* --plain: each stage's explanation on its own line, unwrapped;
- * an unrecognised stage is an empty line, so line i is stage i */
-void out_render_plain(const Analysis *analyses, int n);
+/* --plain: one line per step, unwrapped. &&, ||, ; and a newline start a
+ * step; the stages of one pipe are one step, their sentences joined by a
+ * space. An unrecognised stage says nothing, and a step with nothing
+ * recognised is an empty line, so line i is step i */
+void out_render_plain(const Analysis *analyses, const SepKind *seps, int n);
 
 /* "sheer gen": show the generated command then its risk analysis */
 void out_render_gen(const char *description, const char *generated,
