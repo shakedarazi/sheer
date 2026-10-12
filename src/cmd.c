@@ -112,6 +112,15 @@ static int words_of(const TokList *tl, int from, const char *vshort,
     return n;
 }
 
+/* the k-th positional word (from 0), past the flags that take a value */
+static const Tok *word_of(const TokList *tl, const char *vshort,
+                          const char *const *vlong, int k)
+{
+    int w[8];
+    int n = words_of(tl, 1, vshort, vlong, w, 8);
+    return k < n ? &tl->t[w[k]] : NULL;
+}
+
 /* "a", "a and b", "a, b and c", "a, b and 3 more files" */
 static void list_of(const TokList *tl, const int *idx, int n, char *buf, size_t len)
 {
@@ -850,9 +859,11 @@ static void analyze_git_push(const TokList *tl, Analysis *out)
     bool tags     = tok_has_long(tl, "--tags");
 
     /* Skip subcommand word ("push") to reach arguments */
-    const Tok *subcmd = tok_first_word(tl, 1);
-    const Tok *remote = subcmd ? tok_first_word(tl, (int)(subcmd - tl->t) + 1) : NULL;
-    const Tok *branch = remote ? tok_first_word(tl, (int)(remote - tl->t) + 1) : NULL;
+    static const char *const push_vlong[] = { "--push-option", "--repo", NULL };
+    int w[2];
+    int nw = words_of(tl, g_sub + 1, "o", push_vlong, w, 2);
+    const Tok *remote = nw > 0 ? &tl->t[w[0]] : NULL;
+    const Tok *branch = nw > 1 ? &tl->t[w[1]] : NULL;
 
     char remote_s[64] = "remote";
     char branch_s[64] = "current branch";
@@ -1445,7 +1456,7 @@ static void analyze_ip(const TokList *tl, Analysis *out)
 
 static void analyze_ping(const TokList *tl, Analysis *out)
 {
-    const Tok *host = tok_first_word(tl, 1);
+    const Tok *host = word_of(tl, "cisWtIlpS", NULL, 0);
     char h[128] = "a host";
     if (host) snprintf(h, sizeof h, "%s", host->s);
     snprintf(out->explanation, sizeof out->explanation,
@@ -1646,7 +1657,7 @@ static void analyze_du(const TokList *tl, Analysis *out)
     bool summary = tok_has_short(tl, 's') || tok_has_long(tl, "--summarize");
     bool max1    = tok_has_long(tl, "--max-depth");
 
-    const Tok *t = tok_first_word(tl, 1);
+    const Tok *t = word_of(tl, "dBt", NULL, 0);
     char dir[256] = "the current directory";
     if (t) snprintf(dir, sizeof dir, "%s", t->s);
 
@@ -1810,13 +1821,19 @@ static void analyze_base64(const TokList *tl, Analysis *out)
 
 static void analyze_nohup(const TokList *tl, Analysis *out)
 {
-    const Tok *cmd = tok_first_word(tl, 1);
-    char c[128] = "a command";
-    if (cmd) snprintf(c, sizeof c, "'%s'", cmd->s);
+    /* the command it runs, up to three words; "&" only backgrounds it */
+    char c[128] = "a command", run[120] = "";
+    for (int i = 1, k = 0; i < tl->n && k < 3; i++) {
+        if (strcmp(tl->t[i].s, "&") == 0) continue;
+        if (k++) strncat(run, " ", sizeof run - strlen(run) - 1);
+        strncat(run, tl->t[i].s, sizeof run - strlen(run) - 1);
+    }
+    if (run[0]) snprintf(c, sizeof c, "'%s'", run);
+    g_redir.used = true;
 
     snprintf(out->explanation, sizeof out->explanation,
              "Runs %s detached from the terminal - keeps running after you log out, "
-             "output goes to nohup.out.", c);
+             "output goes to %s.", c, g_redir.out[0] ? g_redir.out : "nohup.out");
     out->risk = RISK_LOW;
 }
 
@@ -2436,7 +2453,7 @@ static void analyze_unzip(const TokList *tl, Analysis *out)
 {
     bool overwrite = tok_has_short(tl, 'o');
     bool list      = tok_has_short(tl, 'l');
-    const Tok *t   = tok_first_word(tl, 1);
+    const Tok *t   = word_of(tl, "dP", NULL, 0);
     char f[256] = "an archive";
     if (t) snprintf(f, sizeof f, "'%s'", t->s);
 
@@ -2498,8 +2515,12 @@ static void analyze_cd(const TokList *tl, Analysis *out)
         /* cd / or cd /root is worth flagging */
         r = path_risk(dest->s) >= RISK_HIGH ? RISK_LOW : RISK_SAFE;
     }
-    snprintf(out->explanation, sizeof out->explanation,
-             "Changes the current directory to %s.", dir);
+    if (dest && strcmp(dest->s, "-") == 0)
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Changes back to the previous directory.");
+    else
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Changes the current directory to %s.", dir);
     out->risk = r;
 }
 
@@ -2532,7 +2553,7 @@ static void analyze_ls(const TokList *tl, Analysis *out)
     bool long_f  = tok_has_short(tl, 'l');
     bool recurse = tok_has_short(tl, 'R');
 
-    const Tok *target = tok_first_word(tl, 1);
+    const Tok *target = word_of(tl, "IwT", NULL, 0);
     char dir[256] = "the current directory";
     if (target) snprintf(dir, sizeof dir, "%s", target->s);
 
@@ -2551,7 +2572,7 @@ static void analyze_ls(const TokList *tl, Analysis *out)
 static void analyze_mkdir(const TokList *tl, Analysis *out)
 {
     bool parents = tok_has_short(tl, 'p') || tok_has_long(tl, "--parents");
-    const Tok *t = tok_first_word(tl, 1);
+    const Tok *t = word_of(tl, "m", NULL, 0);
     char dir[256] = "a directory";
     Risk r = RISK_SAFE;
     if (t) {
@@ -2566,7 +2587,7 @@ static void analyze_mkdir(const TokList *tl, Analysis *out)
 
 static void analyze_touch(const TokList *tl, Analysis *out)
 {
-    const Tok *t = tok_first_word(tl, 1);
+    const Tok *t = word_of(tl, "tdr", NULL, 0);
     char file[256] = "a file";
     if (t) snprintf(file, sizeof file, "%s", t->s);
     snprintf(out->explanation, sizeof out->explanation,

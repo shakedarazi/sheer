@@ -328,6 +328,20 @@ assert_plain "bash -s from a pipe"           "echo ls | bash -s"                
 Runs the shell commands from its input."
 assert_plain "bash -lc inline"               "bash -lc 'ls'"                       "Runs an inline shell command string directly."
 
+# a flag's value is no target
+assert_plain "du -d takes a value"           "du -h -d 1 src"                      "Shows disk usage in human-readable units of src."
+assert_plain "ls -I takes a value"           "ls -I node_modules src"              "Lists files in src."
+assert_plain "mkdir -m takes a value"        "mkdir -m 700 secret"                 "Creates directory secret."
+assert_plain "touch -t takes a value"        "touch -t 202401010000 f"             "Creates f if it doesn't exist, or updates its timestamp."
+assert_plain "touch -r takes a value"        "touch -r ref f"                      "Creates f if it doesn't exist, or updates its timestamp."
+assert_plain "unzip -d takes a value"        "unzip -d out a.zip"                  "Extracts 'a.zip'."
+assert_plain "ping -c takes a value"         "ping -c 3 host"                      "Sends ICMP echo packets to host to check connectivity."
+assert_plain "git push -o takes a value"     "git push -o ci.skip origin main"     "Pushes main to origin."
+assert_plain "git -C dir push"               "git -C repo push origin main"        "Pushes main to origin, in repo."
+assert_plain "cd - goes back"                "cd -"                                "Changes back to the previous directory."
+assert_plain "nohup names the command"       "nohup python serve.py"               "Runs 'python serve.py' detached from the terminal - keeps running after you log out, output goes to nohup.out."
+assert_plain "nohup output redirected"       "nohup python serve.py > /tmp/api.log 2>&1 &" "Runs 'python serve.py' detached from the terminal - keeps running after you log out, output goes to /tmp/api.log."
+
 # report
 echo ""
 printf "  results: %d passed, %d failed\n" "$PASS" "$FAIL"
