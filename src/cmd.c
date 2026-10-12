@@ -1989,9 +1989,15 @@ static void commit_subject(const char *m, char *buf, size_t len)
         const char *nl = strchr(m, '\n');
         m = nl ? nl + 1 : "";
     }
-    size_t l = strcspn(m, "\n");
-    if (l > 72) snprintf(buf, len, "%.69s...", m);
-    else        snprintf(buf, len, "%.*s", (int)l, m);
+    /* count letters, not bytes: a UTF-8 continuation byte is 10xxxxxx */
+    size_t l = strcspn(m, "\n"), cut = l;
+    int letters = 0;
+    for (size_t i = 0; i < l; i++) {
+        if (((unsigned char)m[i] & 0xC0) == 0x80) continue;
+        if (++letters == 70) cut = i;
+    }
+    if (letters > 72) snprintf(buf, len, "%.*s...", (int)cut, m);
+    else              snprintf(buf, len, "%.*s", (int)l, m);
 }
 
 static void analyze_git_commit(const TokList *tl, Analysis *out)
@@ -2002,7 +2008,7 @@ static void analyze_git_commit(const TokList *tl, Analysis *out)
     const char *m = tok_short_val(tl, 'm');
     if (!m) m = tok_long_val(tl, "--message");
 
-    char subject[128] = "", quoted[160] = "";
+    char subject[320] = "", quoted[352] = "";
     if (m) commit_subject(m, subject, sizeof subject);
     if (subject[0]) snprintf(quoted, sizeof quoted, ": \"%s\"", subject);
 

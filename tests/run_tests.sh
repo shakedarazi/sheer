@@ -297,6 +297,10 @@ Shows the last commit and its changes."
 assert_plain "plain does not wrap"            'grep -n "GET /x\"\|call(\"GET" a.ts' "Searches a.ts for 'GET /x\"' or 'call(\"GET'."
 assert_plain "plain unknown single is empty"  "zzqqx -v"                            ""
 
+# a long subject is cut by letters, not bytes: a Hebrew letter is two
+assert_plain "hebrew subject kept whole"     'git commit -m "בבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבב"'   'Records the staged changes as a new commit: "בבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבבב".'
+assert_plain "hebrew subject cut by letters" 'git commit -m "אאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאא"'   'Records the staged changes as a new commit: "אאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאאא...".'
+
 # report
 echo ""
 printf "  results: %d passed, %d failed\n" "$PASS" "$FAIL"
