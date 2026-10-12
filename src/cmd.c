@@ -1694,9 +1694,25 @@ static void analyze_journalctl(const TokList *tl, Analysis *out)
 static void analyze_bash(const TokList *tl, Analysis *out)
 {
     bool inline_cmd = tok_has_short(tl, 'c');
-    const Tok *script = tok_first_word(tl, 1);
+    bool check_only = tok_has_short(tl, 'n');
+    /* -o and -O take an option's name: -o pipefail */
+    int w[1];
+    const Tok *script = words_of(tl, 1, "oO", NULL, w, 1) ? &tl->t[w[0]] : NULL;
+    bool from_input = tok_has_short(tl, 's') || (g_redir.heredoc && !script);
 
-    if (inline_cmd) {
+    if (check_only && script) {
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Checks the shell script '%s' for syntax errors, without running it.",
+                 script->s);
+        out->risk = RISK_SAFE;
+    } else if (from_input && !inline_cmd) {
+        snprintf(out->explanation, sizeof out->explanation,
+                 "Runs the shell commands %s.",
+                 g_redir.heredoc ? "that follow" : "from its input");
+        out->risk = RISK_HIGH;
+        snprintf(out->warning, sizeof out->warning,
+                 "Executes whatever commands it reads - verify them before running.");
+    } else if (inline_cmd) {
         /* bash -c "something" */
         snprintf(out->explanation, sizeof out->explanation,
                  "Runs an inline shell command string directly.");

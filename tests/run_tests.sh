@@ -317,6 +317,17 @@ assert_plain "python -W takes a value"       "python3 -W ignore a.py"           
 assert_plain "python -X takes a value"       "python3 -u -X dev run.py"            "Runs the Python script 'run.py'."
 assert_plain "python inline"                 "python3 -c 'print(1)'"               "Runs an inline Python expression."
 
+# bash: -n only checks, -o takes a value, a heredoc is the script
+assert_plain "bash script"                   "bash run.sh"                         "Runs the shell script 'run.sh'."
+assert_plain "bash -n only checks"           "bash -n deploy.sh"                   "Checks the shell script 'deploy.sh' for syntax errors, without running it."
+assert_plain "bash -o takes a value"         "bash -e -o pipefail run.sh"          "Runs the shell script 'run.sh'."
+assert_plain "bash heredoc"                  "bash <<'EOF'
+ls
+EOF"                                                                                   "Runs the shell commands that follow."
+assert_plain "bash -s from a pipe"           "echo ls | bash -s"                   "Prints 'ls' to stdout.
+Runs the shell commands from its input."
+assert_plain "bash -lc inline"               "bash -lc 'ls'"                       "Runs an inline shell command string directly."
+
 # report
 echo ""
 printf "  results: %d passed, %d failed\n" "$PASS" "$FAIL"
